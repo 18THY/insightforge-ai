@@ -8,7 +8,7 @@ Transforms raw datasets according to auditable cleaning rules:
   3. Column-name normalization with collision safety
   4. Datatype conversion and datetime ISO standardization
   5. Categorical normalization (whitespace and casing harmonization)
-  6. Outlier detection (IQR & Z-score) and optional capping
+  6. Outlier detection (IQR 1.5x) and optional capping
   7. Invalid-value detection
   8. Referential integrity audits on identifier columns
 """
@@ -146,7 +146,7 @@ def detect_outliers_and_invalids(
     classification: str,
     outlier_handling: str = "detect_only",
 ) -> tuple[pd.Series, int, OutlierSummary | None]:
-    """Detect invalid values and numerical outliers (IQR & Z-score)."""
+    """Detect invalid values and numerical outliers using IQR (1.5x)."""
     invalid_count = 0
     outlier_summary = None
 

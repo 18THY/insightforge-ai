@@ -12,7 +12,7 @@ Validates:
    7. test_column_name_normalization
    8. test_categorical_normalization
    9. test_identifier_protection_no_imputation
-  10. test_outlier_detection_iqr_zscore
+  10. test_outlier_detection_iqr
   11. test_referential_integrity_checks
   12. test_preview_does_not_modify_raw_file
   13. test_apply_creates_processed_file
@@ -24,6 +24,7 @@ Validates:
   19. test_cross_organization_access_denied (HTTP 403)
   20. test_malformed_dataset_handling (HTTP 400)
   21. test_sync_dataset_columns_and_status_after_apply
+  22. test_xlsx_input_converts_to_csv_processed_output
 """
 
 from __future__ import annotations
@@ -345,8 +346,8 @@ def test_identifier_protection_no_imputation():
     assert any("order_id" in w and "NOT fabricated" in w for w in warnings)
 
 
-def test_outlier_detection_iqr_zscore():
-    """Test 10: Outlier detection with IQR and optional capping."""
+def test_outlier_detection_iqr():
+    """Test 10: Outlier detection with IQR (1.5x) and optional capping."""
     data = [10.0] * 19 + [10000.0]
     df = pd.DataFrame({"id": range(20), "unit_price": data})
 
@@ -685,3 +686,58 @@ def test_sync_dataset_columns_and_status_after_apply(client: TestClient, db: Ses
     assert "customer_id" in col_names
     assert "product_category" in col_names
     assert "unit_price" in col_names
+
+
+def test_xlsx_input_converts_to_csv_processed_output(client: TestClient, db: Session):
+    """Test 22: XLSX input is intentionally converted to standardized CSV in processed storage."""
+    _, token = _create_user_and_login(client, "clean_xlsx22@example.com")
+    org_id = _create_org(client, token, "XLSX Org 22")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Products"
+    ws.append(["Product ID", "Product Name", "Price", "Stock"])
+    ws.append(["PROD-1", "Laptop Pro", 85000.0, 15])
+    ws.append(["PROD-2", "Wireless Mouse", 1200.0, 150])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    up_resp = client.post(
+        "/datasets/upload",
+        headers=_auth_header(token),
+        data={"organization_id": org_id, "name": "Products XLSX"},
+        files={
+            "file": (
+                "products.xlsx",
+                io.BytesIO(xlsx_bytes),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert up_resp.status_code == 201
+    dataset_id = up_resp.json()["id"]
+    assert up_resp.json()["file_type"] == "xlsx"
+
+    raw_upload_path = os.path.join(get_settings().upload_dir, org_id, f"{dataset_id}.xlsx")
+    assert os.path.exists(raw_upload_path)
+
+    apply_resp = client.post(
+        f"/datasets/{dataset_id}/clean/apply",
+        headers=_auth_header(token),
+        json={},
+    )
+    assert apply_resp.status_code == 200
+    report = apply_resp.json()
+    assert report["output_location"] == f"data/processed/{org_id}/{dataset_id}.csv"
+
+    proc_path = os.path.join(get_settings().processed_dir, org_id, f"{dataset_id}.csv")
+    assert os.path.exists(proc_path)
+    df_proc = pd.read_csv(proc_path)
+    assert len(df_proc) == 2
+    assert list(df_proc.columns) == ["product_id", "product_name", "price", "stock"]
+
+    with open(raw_upload_path, "rb") as f:
+        stored_bytes = f.read()
+    assert hashlib.sha256(stored_bytes).hexdigest() == hashlib.sha256(xlsx_bytes).hexdigest()
+
