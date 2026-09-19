@@ -14,10 +14,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
-# Application-enforced set of valid roles. Represented as a plain string
-# column (not a native Postgres enum type) so that adding a new role is a
-# simple constraint change rather than an enum-altering migration.
-ORGANIZATION_ROLES = ("owner", "admin", "member", "viewer")
+# Application-enforced set of valid roles: admin, analyst, manager, viewer.
+ORGANIZATION_ROLES = ("admin", "analyst", "manager", "viewer")
 
 
 class Organization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -60,7 +58,7 @@ class OrganizationMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         index=True,
     )
-    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="viewer")
 
     organization: Mapped["Organization"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="organization_memberships")

@@ -1,4 +1,4 @@
-﻿"""Tests for the ORM model layer.
+"""Tests for the ORM model layer.
 
 These tests only inspect `Base.metadata` -- they do not require a live
 database connection, so they run in any environment (including CI, once
@@ -83,3 +83,9 @@ def test_org_scoped_tables_have_organization_id_foreign_key():
 def test_document_chunks_has_vector_embedding_column():
     document_chunks = Base.metadata.tables["document_chunks"]
     assert "embedding" in document_chunks.columns
+
+
+def test_organization_member_roles_are_canonical():
+    from app.db.models.organization import ORGANIZATION_ROLES
+
+    assert set(ORGANIZATION_ROLES) == {"admin", "analyst", "manager", "viewer"}
