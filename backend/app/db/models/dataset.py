@@ -41,6 +41,7 @@ class Dataset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    processed_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     file_type: Mapped[str] = mapped_column(String(16), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

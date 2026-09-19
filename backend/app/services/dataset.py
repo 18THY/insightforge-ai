@@ -25,8 +25,17 @@ from app.core.storage import (
 from app.db.models.dataset import Dataset, DatasetColumn
 from app.db.models.organization import OrganizationMember
 from app.db.models.user import User
+from app.schemas.cleaning import (
+    CleaningConfig,
+    CleaningPreviewResponse,
+    CleaningReportResponse,
+)
 from app.schemas.profile import DatasetProfileResponse
-from app.services.profiler import profile_dataset
+from app.services.cleaner import (
+    apply_dataset_cleaning as clean_apply,
+    preview_dataset_cleaning as clean_preview,
+)
+from app.services.profiler import profile_dataframe, profile_dataset
 
 
 def get_user_org_membership(
@@ -341,3 +350,133 @@ def get_dataset_profile(
         db.rollback()
 
     return profile_res
+
+
+def preview_dataset_cleaning(
+    *,
+    dataset_id: uuid.UUID,
+    config: CleaningConfig | None = None,
+    user: User,
+    db: Session,
+) -> CleaningPreviewResponse:
+    """Non-destructive preview of dataset cleaning transformations.
+
+    Enforces:
+      - 404 if dataset does not exist.
+      - 403 if user does not belong to dataset's organization.
+      - 404 if raw storage file is missing.
+      - Read-only: permitted for all active members (ADMIN, ANALYST, MANAGER, VIEWER).
+      - Original raw file is never modified.
+    """
+    dataset = db.execute(
+        select(Dataset).where(Dataset.id == dataset_id)
+    ).scalar_one_or_none()
+
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found.",
+        )
+
+    get_user_org_membership(dataset.organization_id, user.id, db)
+
+    try:
+        return clean_preview(
+            file_path=dataset.storage_path,
+            file_type=dataset.file_type,
+            dataset_id=dataset.id,
+            config=config,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset source file not found in storage.",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+def apply_dataset_cleaning(
+    *,
+    dataset_id: uuid.UUID,
+    config: CleaningConfig | None = None,
+    user: User,
+    db: Session,
+) -> CleaningReportResponse:
+    """Apply cleaning transformations, write processed dataset, and update metadata.
+
+    Enforces:
+      - 404 if dataset does not exist.
+      - 403 if user does not belong to dataset's organization.
+      - 403 if user role is MANAGER or VIEWER (only ADMIN and ANALYST may apply).
+      - Raw source file remains intact and immutable.
+      - Processed file is saved to data/processed/{org_id}/{dataset_id}.csv.
+      - Dataset status set to 'ready', row_count updated, and dataset_columns re-synced.
+    """
+    dataset = db.execute(
+        select(Dataset).where(Dataset.id == dataset_id)
+    ).scalar_one_or_none()
+
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found.",
+        )
+
+    member = get_user_org_membership(dataset.organization_id, user.id, db)
+    if not can_mutate_data(member.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions. Only ADMIN and ANALYST can apply cleaning.",
+        )
+
+    try:
+        cleaned_df, report = clean_apply(
+            file_path=dataset.storage_path,
+            file_type=dataset.file_type,
+            dataset_id=dataset.id,
+            org_id=dataset.organization_id,
+            config=config,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset source file not found in storage.",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Update database metadata
+    try:
+        dataset.status = "ready"
+        dataset.row_count = report.rows_after
+        dataset.processed_path = report.output_location
+
+        # Re-profile cleaned dataframe and sync dataset_columns
+        profile_res = profile_dataframe(cleaned_df, dataset_id=dataset.id)
+
+        db.execute(
+            delete(DatasetColumn).where(DatasetColumn.dataset_id == dataset.id)
+        )
+        for idx, col in enumerate(profile_res.columns):
+            ds_col = DatasetColumn(
+                id=uuid.uuid4(),
+                dataset_id=dataset.id,
+                name=col.name,
+                data_type=col.inferred_datatype,
+                ordinal_position=idx + 1,
+                is_nullable=(col.null_count > 0),
+            )
+            db.add(ds_col)
+
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return report

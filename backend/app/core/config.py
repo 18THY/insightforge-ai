@@ -46,8 +46,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
-    # Storage / Ingestion (Phase 6)
+    # Storage / Ingestion (Phase 6 & 8)
     upload_dir: str = "data/uploads"
+    processed_dir: str = "data/processed"
     max_upload_size_bytes: int = 50 * 1024 * 1024  # 50 MB limit
 
     @property

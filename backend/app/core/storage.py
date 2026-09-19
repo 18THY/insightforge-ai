@@ -207,6 +207,34 @@ def save_upload_file(
     return str(target_path)
 
 
+def get_processed_path(org_id: UUID, dataset_id: UUID, file_type: str = "csv") -> Path:
+    """Generate the secure storage path for a cleaned/processed dataset."""
+    settings = get_settings()
+    base_dir = Path(settings.processed_dir).resolve()
+    org_dir = base_dir / str(org_id)
+    return org_dir / f"{dataset_id}.{file_type}"
+
+
+def save_processed_file(
+    content: bytes,
+    org_id: UUID,
+    dataset_id: UUID,
+    file_type: str = "csv",
+) -> str:
+    """Save cleaned dataset to the dedicated processed storage location.
+
+    Returns:
+        The normalized path string where the processed file is stored.
+    """
+    target_path = get_processed_path(org_id, dataset_id, file_type)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(target_path, "wb") as f:
+        f.write(content)
+
+    return str(target_path)
+
+
 def delete_stored_file(storage_path: str | None) -> bool:
     """Delete a stored file from disk if it exists.
 

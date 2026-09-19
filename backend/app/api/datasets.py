@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.models.user import User
 from app.db.session import get_db
+from app.schemas.cleaning import (
+    CleaningConfig,
+    CleaningPreviewResponse,
+    CleaningReportResponse,
+)
 from app.schemas.dataset import DatasetListResponse, DatasetResponse
 from app.schemas.profile import DatasetProfileResponse
 from app.services import dataset as dataset_service
@@ -152,6 +157,61 @@ def get_dataset_profile(
     """
     return dataset_service.get_dataset_profile(
         dataset_id=dataset_id,
+        user=current_user,
+        db=db,
+    )
+
+
+@router.post(
+    "/{dataset_id}/clean/preview",
+    response_model=CleaningPreviewResponse,
+    summary="Preview data-cleaning transformations non-destructively",
+)
+def preview_dataset_cleaning(
+    dataset_id: uuid.UUID,
+    config: CleaningConfig | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CleaningPreviewResponse:
+    """Dry-run preview of dataset cleaning transformations.
+
+    Does NOT modify the raw stored source file.
+
+    Requires:
+      - Authenticated user
+      - Active membership in the dataset's organization (ADMIN, ANALYST, MANAGER, VIEWER)
+    """
+    return dataset_service.preview_dataset_cleaning(
+        dataset_id=dataset_id,
+        config=config,
+        user=current_user,
+        db=db,
+    )
+
+
+@router.post(
+    "/{dataset_id}/clean/apply",
+    response_model=CleaningReportResponse,
+    summary="Apply data cleaning, persist to processed directory, and update metadata",
+)
+def apply_dataset_cleaning(
+    dataset_id: uuid.UUID,
+    config: CleaningConfig | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CleaningReportResponse:
+    """Apply cleaning transformations and save processed dataset.
+
+    Preserves the raw uploaded source file untouched and writes the cleaned
+    dataset to data/processed/{org_id}/{dataset_id}.csv.
+
+    Requires:
+      - Authenticated user
+      - Role of ADMIN or ANALYST in the dataset's organization
+    """
+    return dataset_service.apply_dataset_cleaning(
+        dataset_id=dataset_id,
+        config=config,
         user=current_user,
         db=db,
     )

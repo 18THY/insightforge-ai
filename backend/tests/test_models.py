@@ -93,7 +93,7 @@ def test_organization_member_roles_are_canonical():
 
 def test_datasets_has_storage_metadata_columns():
     datasets = Base.metadata.tables["datasets"]
-    for col in ("storage_path", "file_type", "file_size", "status", "row_count"):
+    for col in ("storage_path", "processed_path", "file_type", "file_size", "status", "row_count"):
         assert col in datasets.columns, f"datasets missing column: {col}"
 
 
