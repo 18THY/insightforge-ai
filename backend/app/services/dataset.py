@@ -9,6 +9,7 @@ content validation, safe storage handling, and database metadata updates.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Sequence
 
 from fastapi import HTTPException, UploadFile, status
@@ -52,10 +53,21 @@ from app.services.analytics import (
     run_crosstab,
     run_time_series,
 )
+from app.db.models.ml import Anomaly, Forecast
+from app.schemas.ml import (
+    AnomalyDetectRequest,
+    AnomalyItemResponse,
+    AnomalyListResponse,
+    ForecastGenerateRequest,
+    ForecastPointResponse,
+    ForecastResponse,
+    MLSummaryResponse,
+)
 from app.services.cleaner import (
     apply_dataset_cleaning as clean_apply,
     preview_dataset_cleaning as clean_preview,
 )
+from app.services.ml import detect_anomalies, generate_forecast
 from app.services.profiler import profile_dataframe, profile_dataset
 
 
@@ -618,4 +630,329 @@ def query_dataset_correlation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: Machine Learning Engine Orchestrations
+# ---------------------------------------------------------------------------
+
+def run_dataset_anomaly_detection(
+    *,
+    dataset_id: uuid.UUID,
+    req: AnomalyDetectRequest,
+    user: User,
+    db: Session,
+) -> AnomalyListResponse:
+    """Execute anomaly detection and optionally persist results to database."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+    member = get_user_org_membership(dataset.organization_id, user.id, db)
+    if not can_mutate_data(member.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions. Only ADMIN and ANALYST can trigger anomaly detection.",
+        )
+
+    try:
+        df, _ = resolve_and_load_dataset(dataset)
+        anomalies_data, provenance = detect_anomalies(df, req, dataset.id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    items: list[AnomalyItemResponse] = []
+    if req.persist:
+        if req.replace_scope == "all":
+            db.query(Anomaly).filter(
+                Anomaly.organization_id == dataset.organization_id,
+                Anomaly.dataset_id == dataset.id,
+                Anomaly.metric_name == req.metric_column,
+            ).delete(synchronize_session=False)
+        elif req.replace_scope == "date_range" and anomalies_data:
+            min_dt = min(a["detected_at"] for a in anomalies_data)
+            max_dt = max(a["detected_at"] for a in anomalies_data)
+            db.query(Anomaly).filter(
+                Anomaly.organization_id == dataset.organization_id,
+                Anomaly.dataset_id == dataset.id,
+                Anomaly.metric_name == req.metric_column,
+                Anomaly.detected_at.between(min_dt, max_dt),
+            ).delete(synchronize_session=False)
+
+        for a in anomalies_data:
+            record = Anomaly(
+                organization_id=dataset.organization_id,
+                dataset_id=dataset.id,
+                metric_name=a["metric_name"],
+                detected_at=a["detected_at"],
+                severity=a["severity"],
+                description=a["description"],
+                value=a["value"],
+                expected_value=a["expected_value"],
+            )
+            db.add(record)
+            db.flush()
+            items.append(
+                AnomalyItemResponse(
+                    id=record.id,
+                    metric_name=record.metric_name,
+                    detected_at=record.detected_at,
+                    severity=record.severity,
+                    value=float(record.value) if record.value is not None else None,
+                    expected_value=float(record.expected_value) if record.expected_value is not None else None,
+                    deviation_pct=a.get("deviation_pct"),
+                    description=record.description,
+                    algorithm=a.get("algorithm"),
+                )
+            )
+        db.commit()
+    else:
+        for a in anomalies_data:
+            items.append(
+                AnomalyItemResponse(
+                    id=None,
+                    metric_name=a["metric_name"],
+                    detected_at=a["detected_at"],
+                    severity=a["severity"],
+                    value=a.get("value"),
+                    expected_value=a.get("expected_value"),
+                    deviation_pct=a.get("deviation_pct"),
+                    description=a.get("description"),
+                    algorithm=a.get("algorithm"),
+                )
+            )
+
+    return AnomalyListResponse(
+        dataset_id=dataset.id,
+        metric_name=req.metric_column,
+        total_anomalies=len(items),
+        anomalies=items,
+        provenance=provenance,
+    )
+
+
+def list_dataset_anomalies(
+    *,
+    dataset_id: uuid.UUID,
+    metric_name: str | None = None,
+    severity: str | None = None,
+    user: User,
+    db: Session,
+) -> AnomalyListResponse:
+    """List persisted anomalies for a dataset with tenant isolation."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    query = db.query(Anomaly).filter(
+        Anomaly.organization_id == dataset.organization_id,
+        Anomaly.dataset_id == dataset.id,
+    )
+    if metric_name:
+        query = query.filter(Anomaly.metric_name == metric_name)
+    if severity:
+        query = query.filter(Anomaly.severity == severity.lower())
+
+    records = query.order_by(Anomaly.detected_at.desc()).all()
+    items = [
+        AnomalyItemResponse(
+            id=r.id,
+            metric_name=r.metric_name,
+            detected_at=r.detected_at,
+            severity=r.severity,
+            value=float(r.value) if r.value is not None else None,
+            expected_value=float(r.expected_value) if r.expected_value is not None else None,
+            deviation_pct=round(((float(r.value) - float(r.expected_value)) / max(abs(float(r.expected_value)), 1e-6)) * 100.0, 2) if r.value is not None and r.expected_value is not None else None,
+            description=r.description,
+            algorithm="persisted",
+        )
+        for r in records
+    ]
+
+    return AnomalyListResponse(
+        dataset_id=dataset.id,
+        metric_name=metric_name or "all",
+        total_anomalies=len(items),
+        anomalies=items,
+        provenance={
+            "dataset_id": str(dataset.id),
+            "source": "database_persisted",
+            "count": len(items),
+            "metric_filter": metric_name,
+            "severity_filter": severity,
+        },
+    )
+
+
+def run_dataset_forecasting(
+    *,
+    dataset_id: uuid.UUID,
+    req: ForecastGenerateRequest,
+    user: User,
+    db: Session,
+) -> ForecastResponse:
+    """Generate predictive time-series forecast with OLS and prediction intervals."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+    member = get_user_org_membership(dataset.organization_id, user.id, db)
+    if not can_mutate_data(member.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions. Only ADMIN and ANALYST can generate forecasts.",
+        )
+
+    try:
+        df, _ = resolve_and_load_dataset(dataset)
+        points_data, provenance = generate_forecast(df, req, dataset.id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    items: list[ForecastPointResponse] = []
+    now_utc = datetime.now(timezone.utc)
+
+    if req.persist and points_data:
+        if req.replace_scope == "horizon_range":
+            min_d = min(p["forecast_date"] for p in points_data)
+            max_d = max(p["forecast_date"] for p in points_data)
+            db.query(Forecast).filter(
+                Forecast.organization_id == dataset.organization_id,
+                Forecast.dataset_id == dataset.id,
+                Forecast.metric_name == req.metric_column,
+                Forecast.forecast_date.between(min_d, max_d),
+            ).delete(synchronize_session=False)
+        else:
+            db.query(Forecast).filter(
+                Forecast.organization_id == dataset.organization_id,
+                Forecast.dataset_id == dataset.id,
+                Forecast.metric_name == req.metric_column,
+            ).delete(synchronize_session=False)
+
+        for p in points_data:
+            record = Forecast(
+                organization_id=dataset.organization_id,
+                dataset_id=dataset.id,
+                metric_name=req.metric_column,
+                forecast_date=p["forecast_date"],
+                predicted_value=p["predicted_value"],
+                lower_bound=p["lower_bound"],
+                upper_bound=p["upper_bound"],
+                model_name=p["model_name"],
+                generated_at=now_utc,
+            )
+            db.add(record)
+            items.append(
+                ForecastPointResponse(
+                    forecast_date=p["forecast_date"],
+                    predicted_value=p["predicted_value"],
+                    lower_bound=p["lower_bound"],
+                    upper_bound=p["upper_bound"],
+                    model_name=p["model_name"],
+                )
+            )
+        db.commit()
+    else:
+        for p in points_data:
+            items.append(
+                ForecastPointResponse(
+                    forecast_date=p["forecast_date"],
+                    predicted_value=p["predicted_value"],
+                    lower_bound=p["lower_bound"],
+                    upper_bound=p["upper_bound"],
+                    model_name=p["model_name"],
+                )
+            )
+
+    return ForecastResponse(
+        dataset_id=dataset.id,
+        metric_name=req.metric_column,
+        horizon_days=req.horizon_days,
+        model_name=provenance.get("model_name", "OLSTrend"),
+        generated_at=now_utc,
+        forecasts=items,
+        provenance=provenance,
+    )
+
+
+def get_dataset_forecasts(
+    *,
+    dataset_id: uuid.UUID,
+    metric_name: str | None = None,
+    user: User,
+    db: Session,
+) -> ForecastResponse:
+    """Retrieve persisted forecasts for a dataset."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    query = db.query(Forecast).filter(
+        Forecast.organization_id == dataset.organization_id,
+        Forecast.dataset_id == dataset.id,
+    )
+    if metric_name:
+        query = query.filter(Forecast.metric_name == metric_name)
+
+    records = query.order_by(Forecast.forecast_date.asc()).all()
+    items = [
+        ForecastPointResponse(
+            forecast_date=r.forecast_date,
+            predicted_value=float(r.predicted_value),
+            lower_bound=float(r.lower_bound) if r.lower_bound is not None else None,
+            upper_bound=float(r.upper_bound) if r.upper_bound is not None else None,
+            model_name=r.model_name,
+        )
+        for r in records
+    ]
+
+    latest_gen = max((r.generated_at for r in records), default=datetime.now(timezone.utc))
+    first_model = records[0].model_name if records else "Unknown"
+
+    return ForecastResponse(
+        dataset_id=dataset.id,
+        metric_name=metric_name or (records[0].metric_name if records else "all"),
+        horizon_days=len(items),
+        model_name=first_model,
+        generated_at=latest_gen,
+        forecasts=items,
+        provenance={
+            "dataset_id": str(dataset.id),
+            "source": "database_persisted",
+            "metric_filter": metric_name,
+            "total_points": len(items),
+        },
+    )
+
+
+def get_dataset_ml_summary(
+    *,
+    dataset_id: uuid.UUID,
+    user: User,
+    db: Session,
+) -> MLSummaryResponse:
+    """Retrieve executive summary of active anomalies and forecast points."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    anomalies = db.query(Anomaly).filter(
+        Anomaly.organization_id == dataset.organization_id,
+        Anomaly.dataset_id == dataset.id,
+    ).all()
+
+    sev_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0}
+    anom_metrics = set()
+    for a in anomalies:
+        if a.severity in sev_counts:
+            sev_counts[a.severity] += 1
+        anom_metrics.add(a.metric_name)
+
+    forecast_records = db.query(Forecast).filter(
+        Forecast.organization_id == dataset.organization_id,
+        Forecast.dataset_id == dataset.id,
+    ).all()
+
+    fc_metrics = {f.metric_name for f in forecast_records}
+    all_metrics = sorted(anom_metrics.union(fc_metrics))
+
+    return MLSummaryResponse(
+        dataset_id=dataset.id,
+        total_anomalies_active=len(anomalies),
+        anomalies_by_severity=sev_counts,
+        forecasts_active_count=len(forecast_records),
+        metrics_analyzed=all_metrics,
+    )
 
