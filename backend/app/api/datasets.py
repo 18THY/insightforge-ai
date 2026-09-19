@@ -14,6 +14,7 @@ from app.api.deps import get_current_user
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.dataset import DatasetListResponse, DatasetResponse
+from app.schemas.profile import DatasetProfileResponse
 from app.services import dataset as dataset_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -131,3 +132,26 @@ def delete_dataset(
         db=db,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{dataset_id}/profile",
+    response_model=DatasetProfileResponse,
+    summary="Get dataset schema and data quality profile",
+)
+def get_dataset_profile(
+    dataset_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DatasetProfileResponse:
+    """Retrieve comprehensive profile, statistics, and quality score for a dataset.
+
+    Requires:
+      - Authenticated user
+      - Active membership in the dataset's organization (ADMIN, ANALYST, MANAGER, VIEWER)
+    """
+    return dataset_service.get_dataset_profile(
+        dataset_id=dataset_id,
+        user=current_user,
+        db=db,
+    )

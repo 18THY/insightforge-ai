@@ -12,7 +12,7 @@ import uuid
 from typing import Sequence
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.rbac import can_mutate_data
@@ -22,9 +22,11 @@ from app.core.storage import (
     save_upload_file,
     validate_file_content,
 )
-from app.db.models.dataset import Dataset
+from app.db.models.dataset import Dataset, DatasetColumn
 from app.db.models.organization import OrganizationMember
 from app.db.models.user import User
+from app.schemas.profile import DatasetProfileResponse
+from app.services.profiler import profile_dataset
 
 
 def get_user_org_membership(
@@ -265,3 +267,77 @@ def delete_dataset(
 
     # Clean up physical file
     delete_stored_file(storage_path)
+
+
+def get_dataset_profile(
+    *,
+    dataset_id: uuid.UUID,
+    user: User,
+    db: Session,
+) -> DatasetProfileResponse:
+    """Retrieve or compute the dataset data-quality and schema profile.
+
+    Enforces:
+      - 404 if dataset does not exist.
+      - 403 if caller is not an active member of dataset's organization.
+      - 404 if storage file is missing on disk.
+      - 400 if dataset file is empty or malformed.
+      - All canonical roles (ADMIN, ANALYST, MANAGER, VIEWER) may access profiling (read-only).
+      - Synchronizes dataset.status = "ready", dataset.row_count, and dataset_columns in DB.
+    """
+    dataset = db.execute(
+        select(Dataset).where(Dataset.id == dataset_id)
+    ).scalar_one_or_none()
+
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found.",
+        )
+
+    # Organization membership check (all 4 roles permitted)
+    get_user_org_membership(dataset.organization_id, user.id, db)
+
+    # Run profiling
+    try:
+        profile_res = profile_dataset(
+            file_path=dataset.storage_path,
+            file_type=dataset.file_type,
+            dataset_id=dataset.id,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset file not found in storage.",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Synchronize database state: status, row_count, and dataset_columns
+    try:
+        dataset.status = "ready"
+        dataset.row_count = profile_res.row_count
+
+        # Clean existing column records if any to avoid duplication
+        db.execute(
+            delete(DatasetColumn).where(DatasetColumn.dataset_id == dataset.id)
+        )
+        for idx, col in enumerate(profile_res.columns):
+            ds_col = DatasetColumn(
+                id=uuid.uuid4(),
+                dataset_id=dataset.id,
+                name=col.name,
+                data_type=col.inferred_datatype,
+                ordinal_position=idx + 1,
+                is_nullable=(col.null_count > 0),
+            )
+            db.add(ds_col)
+
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return profile_res
