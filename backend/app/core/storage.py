@@ -251,3 +251,21 @@ def delete_stored_file(storage_path: str | None) -> bool:
     except Exception:
         pass
     return False
+
+
+def validate_path_containment(path: Path | str, expected_parent_dir: Path | str) -> Path:
+    """Validate that path resolves strictly inside expected_parent_dir.
+
+    Raises:
+        ValueError: If the path traverses outside the expected parent directory.
+    """
+    resolved_path = Path(path).resolve()
+    resolved_parent = Path(expected_parent_dir).resolve()
+    try:
+        resolved_path.relative_to(resolved_parent)
+    except ValueError:
+        raise ValueError(
+            f"Path traversal or unsafe path detected: '{path}' is not within '{expected_parent_dir}'"
+        )
+    return resolved_path
+

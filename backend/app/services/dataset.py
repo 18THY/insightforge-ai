@@ -30,7 +30,28 @@ from app.schemas.cleaning import (
     CleaningPreviewResponse,
     CleaningReportResponse,
 )
-from app.schemas.profile import DatasetProfileResponse
+from app.schemas.analytics import (
+    AggregationQuery,
+    AggregationResult,
+    BreakdownQuery,
+    BreakdownResult,
+    CorrelationQuery,
+    CorrelationResult,
+    CrossTabQuery,
+    CrossTabResult,
+    DatasetOverviewResponse,
+    TimeSeriesQuery,
+    TimeSeriesResult,
+)
+from app.services.analytics import (
+    compute_overview,
+    resolve_and_load_dataset,
+    run_aggregation,
+    run_breakdown,
+    run_correlation,
+    run_crosstab,
+    run_time_series,
+)
 from app.services.cleaner import (
     apply_dataset_cleaning as clean_apply,
     preview_dataset_cleaning as clean_preview,
@@ -480,3 +501,121 @@ def apply_dataset_cleaning(
         db.rollback()
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: Analytics Engine Orchestrations
+# ---------------------------------------------------------------------------
+
+def get_dataset_analytics_overview(
+    *,
+    dataset_id: uuid.UUID,
+    user: User,
+    db: Session,
+) -> DatasetOverviewResponse:
+    """Compute high-level summary KPIs and statistics for a dataset."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return compute_overview(df, dataset.id, is_cleaned)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def query_dataset_aggregation(
+    *,
+    dataset_id: uuid.UUID,
+    query: AggregationQuery,
+    user: User,
+    db: Session,
+) -> AggregationResult:
+    """Execute multi-dimensional grouping and metric aggregation."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return run_aggregation(df, dataset.id, is_cleaned, query)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def query_dataset_time_series(
+    *,
+    dataset_id: uuid.UUID,
+    query: TimeSeriesQuery,
+    user: User,
+    db: Session,
+) -> TimeSeriesResult:
+    """Execute temporal time-series resampling and trend analysis."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return run_time_series(df, dataset.id, is_cleaned, query)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def query_dataset_breakdown(
+    *,
+    dataset_id: uuid.UUID,
+    query: BreakdownQuery,
+    user: User,
+    db: Session,
+) -> BreakdownResult:
+    """Compute single-dimension segment distribution and ranking."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return run_breakdown(df, dataset.id, is_cleaned, query)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def query_dataset_crosstab(
+    *,
+    dataset_id: uuid.UUID,
+    query: CrossTabQuery,
+    user: User,
+    db: Session,
+) -> CrossTabResult:
+    """Compute 2D cross-tabulation / contingency matrix."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return run_crosstab(df, dataset.id, is_cleaned, query)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def query_dataset_correlation(
+    *,
+    dataset_id: uuid.UUID,
+    query: CorrelationQuery,
+    user: User,
+    db: Session,
+) -> CorrelationResult:
+    """Compute correlation matrix across numeric columns."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    try:
+        df, is_cleaned = resolve_and_load_dataset(dataset)
+        return run_correlation(df, dataset.id, is_cleaned, query)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
