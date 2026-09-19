@@ -45,7 +45,7 @@ export interface DatasetResponse {
   name: string;
   description: string | null;
   original_filename: string;
-  file_format: string;
+  file_type: string;
   file_size_bytes: number;
   row_count: number | null;
   column_count: number | null;
