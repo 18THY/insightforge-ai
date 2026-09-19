@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Sequence
 
+import pandas as pd
+
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -53,7 +55,10 @@ from app.services.analytics import (
     run_crosstab,
     run_time_series,
 )
+from app.db.models.audit import AuditLog
 from app.db.models.ml import Anomaly, Forecast
+from app.schemas.rca import RCAAnalyzeRequest, RCAResponse
+from app.services.rca import compute_root_cause_analysis
 from app.schemas.ml import (
     AnomalyDetectRequest,
     AnomalyItemResponse,
@@ -955,4 +960,119 @@ def get_dataset_ml_summary(
         forecasts_active_count=len(forecast_records),
         metrics_analyzed=all_metrics,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: Root-Cause Analysis (RCA) Engine Orchestration
+# ---------------------------------------------------------------------------
+
+def run_dataset_rca(
+    *,
+    dataset_id: uuid.UUID,
+    req: RCAAnalyzeRequest,
+    user: User,
+    db: Session,
+    client_ip: str | None = None,
+) -> RCAResponse:
+    """Execute Root-Cause Analysis over a dataset with tenant isolation and audit logging."""
+    dataset = get_dataset(dataset_id=dataset_id, user=user, db=db)
+
+    anchor_date = None
+    if req.anomaly_id is not None:
+        anomaly = db.query(Anomaly).filter(
+            Anomaly.id == req.anomaly_id,
+            Anomaly.organization_id == dataset.organization_id,
+        ).first()
+
+        if anomaly is None:
+            # Check if anomaly belongs to another tenant
+            other = db.query(Anomaly).filter(Anomaly.id == req.anomaly_id).first()
+            if other is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cross-organization anomaly access forbidden.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Anomaly not found.",
+            )
+
+        if not req.metric_column:
+            req.metric_column = anomaly.metric_name
+        anchor_date = anomaly.detected_at.date()
+
+    try:
+        df, _ = resolve_and_load_dataset(dataset)
+
+        # If date_column is not provided, attempt auto-detection from dataset columns
+        if not req.date_column:
+            for col in df.columns:
+                parsed = pd.to_datetime(df[col], errors="coerce")
+                if parsed.notna().sum() >= max(2, len(df) // 2):
+                    req.date_column = col
+                    break
+            if not req.date_column:
+                raise ValueError("Could not auto-detect a valid date column in dataset.")
+
+        rca_res = compute_root_cause_analysis(
+            df=df,
+            req=req,
+            dataset_id=dataset.id,
+            anchor_date=anchor_date,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Structured Audit Logging (Never storing raw dataset contents)
+    try:
+        top_driver_info = None
+        if rca_res.primary_drivers:
+            td = rca_res.primary_drivers[0]
+            top_driver_info = {
+                "dimension": td.dimension,
+                "segment": td.segment_value,
+                "contribution_pct": td.contribution_pct,
+            }
+
+        audit_entry = AuditLog(
+            id=uuid.uuid4(),
+            organization_id=dataset.organization_id,
+            user_id=user.id,
+            action="rca.executed",
+            resource_type="dataset",
+            resource_id=dataset.id,
+            ip_address=client_ip,
+            meta={
+                "anomaly_id": str(req.anomaly_id) if req.anomaly_id else None,
+                "metric_name": rca_res.metric_name,
+                "event_window": {
+                    "start": str(rca_res.event_window["start"]),
+                    "end": str(rca_res.event_window["end"]),
+                },
+                "baseline_window": {
+                    "start": str(rca_res.baseline_window["start"]),
+                    "end": str(rca_res.baseline_window["end"]),
+                },
+                "baseline_mode": rca_res.provenance.get("baseline_mode_applied"),
+                "parameters": {
+                    "top_k_drivers": req.top_k_drivers,
+                    "max_dimensions": req.max_dimensions,
+                },
+                "total_delta": rca_res.total_delta,
+                "reconciled": rca_res.reconciliation.is_reconciled,
+                "top_driver": top_driver_info,
+                "status": "success",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(audit_entry)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return rca_res
+
 
