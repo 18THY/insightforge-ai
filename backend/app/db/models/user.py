@@ -1,9 +1,12 @@
-"""User model.
+﻿"""User model.
 
-This is a data-layer definition only. No authentication logic (password
-hashing, login, tokens) is implemented in this phase; `hashed_password` is
-provisioned as a column for a later phase to populate.
+Phase 4 adds the `auth_sessions` relationship so that AuthSession rows
+can be navigated from a User object. The `hashed_password` column was
+provisioned in Phase 2 and is now actively used by the authentication
+service.
 """
+
+from __future__ import annotations
 
 from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -21,5 +24,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     organization_memberships: Mapped[list["OrganizationMember"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    auth_sessions: Mapped[list["AuthSession"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )

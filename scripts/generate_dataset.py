@@ -699,8 +699,10 @@ def verify_and_summarise(datasets: dict[str, pd.DataFrame]) -> None:
         print(f"  orders -> customers:   {len(orphan_o_c):>5,} invalid customer_id refs (intentional ~1.5% missing + dupes may add more)")
     if not (ord_.empty or prod.empty):
         valid_p = set(prod["product_id"].dropna())
+        bad_p_rows = int((~ord_["product_id"].isin(valid_p)).sum())
         orphan_o_p = set(ord_["product_id"].dropna()) - valid_p
-        print(f"  orders -> products:   {len(orphan_o_p):>5,} invalid product_id refs (expected: only PROD9999)")
+        pct_bad = 100 * bad_p_rows / max(len(ord_), 1)
+        print(f"  orders -> products:   {bad_p_rows:>5,} rows ({pct_bad:.2f}%) with invalid product_id ({len(orphan_o_p)} distinct: {orphan_o_p})")
     if not (pay.empty or ord_.empty):
         valid_o = set(ord_["order_id"].dropna())
         orphan_pay = set(pay["order_id"].dropna()) - valid_o

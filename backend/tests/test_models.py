@@ -1,6 +1,6 @@
-"""Tests for the ORM model layer.
+﻿"""Tests for the ORM model layer.
 
-These tests only inspect `Base.metadata` — they do not require a live
+These tests only inspect `Base.metadata` -- they do not require a live
 database connection, so they run in any environment (including CI, once
 configured) without needing PostgreSQL available. Migration-level
 verification against a real database was performed manually for Phase 2
@@ -28,6 +28,8 @@ EXPECTED_TABLES = {
     "forecasts",
     "reports",
     "audit_logs",
+    # Phase 4 -- authentication sessions
+    "auth_sessions",
 }
 
 
@@ -51,10 +53,23 @@ def test_audit_logs_has_no_updated_at_append_only():
     assert "updated_at" not in audit_logs.columns
 
 
+def test_auth_sessions_has_no_updated_at_append_only():
+    """auth_sessions is append-only (like audit_logs) -- no updated_at."""
+    auth_sessions = Base.metadata.tables["auth_sessions"]
+    assert "updated_at" not in auth_sessions.columns
+
+
+def test_auth_sessions_has_required_columns():
+    t = Base.metadata.tables["auth_sessions"]
+    for col in ("user_id", "token_hash", "expires_at", "revoked", "revoked_at"):
+        assert col in t.columns, f"auth_sessions missing column: {col}"
+
+
 def test_org_scoped_tables_have_organization_id_foreign_key():
     org_scoped = EXPECTED_TABLES - {
         "users",
         "organizations",
+        "auth_sessions",        # platform-wide, not org-scoped
         # scoped indirectly through a parent, not a direct FK column
         "dataset_columns",
         "ai_messages",
