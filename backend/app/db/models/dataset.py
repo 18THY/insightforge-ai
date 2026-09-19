@@ -8,14 +8,14 @@ can display and validate against it without re-reading the source file.
 
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
-DATASET_STATUSES = ("uploaded", "profiling", "ready", "error")
+DATASET_STATUSES = ("uploaded", "processing", "ready", "failed")
 
 
 class Dataset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -40,8 +40,19 @@ class Dataset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="uploaded")
+
+    @property
+    def uploaded_by(self) -> uuid.UUID | None:
+        return self.created_by
+
+    @property
+    def original_filename(self) -> str:
+        return self.source_filename or ""
 
     columns: Mapped[list["DatasetColumn"]] = relationship(
         back_populates="dataset", cascade="all, delete-orphan", order_by="DatasetColumn.ordinal_position"

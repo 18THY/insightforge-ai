@@ -89,3 +89,15 @@ def test_organization_member_roles_are_canonical():
     from app.db.models.organization import ORGANIZATION_ROLES
 
     assert set(ORGANIZATION_ROLES) == {"admin", "analyst", "manager", "viewer"}
+
+
+def test_datasets_has_storage_metadata_columns():
+    datasets = Base.metadata.tables["datasets"]
+    for col in ("storage_path", "file_type", "file_size", "status", "row_count"):
+        assert col in datasets.columns, f"datasets missing column: {col}"
+
+
+def test_dataset_statuses_are_canonical():
+    from app.db.models.dataset import DATASET_STATUSES
+
+    assert set(DATASET_STATUSES) == {"uploaded", "processing", "ready", "failed"}
