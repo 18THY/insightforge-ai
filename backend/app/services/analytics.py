@@ -42,6 +42,8 @@ from app.schemas.analytics import (
     TimeSeriesResult,
 )
 from app.services.profiler import _CONTINUOUS_METRIC_PATTERNS, _DATE_NAME_PATTERNS, load_dataset_dataframe
+from app.services.cleaner import normalize_column_name
+
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,67 @@ def resolve_and_load_dataset(dataset: Dataset) -> tuple[pd.DataFrame, bool]:
 
         if safe_processed_path.exists() and safe_processed_path.is_file():
             df = pd.read_csv(safe_processed_path)
+
+            # Phase 8 cleaning normalizes column headers to snake_case.
+            # The profile API exposes the original uploaded column names.
+            # Restore the original names when the processed artifact matches
+            # the normalized form of the raw dataset columns.
+            try:
+                raw_upload_dir = Path(settings.upload_dir).resolve() / str(dataset.organization_id)
+                canonical_raw = get_upload_path(
+                    dataset.organization_id,
+                    dataset.id,
+                    dataset.file_type,
+                )
+                safe_raw_path = validate_path_containment(
+                    canonical_raw,
+                    raw_upload_dir,
+                )
+
+                if safe_raw_path.exists() and safe_raw_path.is_file():
+                    raw_df = load_dataset_dataframe(
+                        safe_raw_path,
+                        dataset.file_type,
+                    )
+
+                    raw_columns = [str(c) for c in raw_df.columns]
+                    processed_columns = [str(c) for c in df.columns]
+
+                    if (
+                        len(raw_columns) == len(processed_columns)
+                        and raw_columns != processed_columns
+                    ):
+                        normalized_to_original: dict[str, str] = {}
+                        collision = False
+
+                        for original in raw_columns:
+                            normalized = normalize_column_name(original)
+
+                            if (
+                                normalized in normalized_to_original
+                                and normalized_to_original[normalized] != original
+                            ):
+                                collision = True
+                                break
+
+                            normalized_to_original[normalized] = original
+
+                        if (
+                            not collision
+                            and all(
+                                column in normalized_to_original
+                                for column in processed_columns
+                            )
+                        ):
+                            df.columns = [
+                                normalized_to_original[column]
+                                for column in processed_columns
+                            ]
+            except (FileNotFoundError, ValueError):
+                # If the raw artifact cannot be loaded, keep the processed
+                # dataframe unchanged rather than breaking analytics.
+                pass
+
             return df, True
 
     # 2. Fallback to raw upload storage_path
